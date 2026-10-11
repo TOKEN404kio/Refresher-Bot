@@ -15,32 +15,48 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 FORMULA_FILE = "formulas.json"
 LINK_FILE = "link.txt"
 
-# --- DATABASE LOGIC ---
-def load_formulas():
+# --- LIGHTNING FAST MEMORY CACHE ---
+# This keeps data in RAM so it loads instantly without disk lag
+cached_formulas = ["Formula A", "Formula B", "Formula C", "Formula D"]
+cached_delete_link = "https://your-default-link.com"
+
+# --- DATABASE LOGIC (RUNS IN BACKGROUND) ---
+def load_data_into_memory():
+    global cached_formulas, cached_delete_link
+    
+    # Load formulas
     if os.path.exists(FORMULA_FILE):
         try:
             with open(FORMULA_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return ["Formula A", "Formula B", "Formula C", "Formula D"]
-
-def save_formulas(options_list):
-    with open(FORMULA_FILE, "w") as f:
-        json.dump(options_list, f)
-
-def load_delete_link():
+                cached_formulas = json.load(f)
+        except Exception as e:
+            print(f"Error reading formulas file: {e}")
+            
+    # Load link
     if os.path.exists(LINK_FILE):
         try:
             with open(LINK_FILE, "r") as f:
-                return f.read().strip()
-        except Exception:
-            pass
-    return "https://your-default-link.com"
+                cached_delete_link = f.read().strip()
+        except Exception as e:
+            print(f"Error reading link file: {e}")
+
+def save_formulas(options_list):
+    global cached_formulas
+    cached_formulas = options_list  # Update memory instantly
+    try:
+        with open(FORMULA_FILE, "w") as f:
+            json.dump(options_list, f)
+    except Exception as e:
+        print(f"Failed to write formulas file: {e}")
 
 def save_delete_link(new_link):
-    with open(LINK_FILE, "w") as f:
-        f.write(new_link.strip())
+    global cached_delete_link
+    cached_delete_link = new_link.strip()  # Update memory instantly
+    try:
+        with open(LINK_FILE, "w") as f:
+            f.write(new_link.strip())
+    except Exception as e:
+        print(f"Failed to write link file: {e}")
 
 
 # --- THE TEXT BOX POP-UP ---
@@ -59,11 +75,13 @@ class FormulaInputModal(discord.ui.Modal):
         self.add_item(self.user_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # 1. Instantly respond to stop timeout errors
         await interaction.response.send_message(
             "Verifying that this is real. This could take up to 2 hours.", 
             ephemeral=True
         )
 
+        # 2. DM the Bot Owner (You)
         try:
             owner = await bot.fetch_user(bot.owner_id)
             dm_embed = discord.Embed(
@@ -82,12 +100,12 @@ class FormulaInputModal(discord.ui.Modal):
 # --- THE DROPDOWN SELECT MENU ---
 class FormulaSelect(discord.ui.Select):
     def __init__(self):
-        formula_options = load_formulas()
-        options = [discord.SelectOption(label=opt, description=f"Select {opt}") for opt in formula_options]
+        # Grabs straight from fast RAM cache instead of reading disk
+        options = [discord.SelectOption(label=opt, description=f"Select {opt}") for opt in cached_formulas]
         super().__init__(placeholder="Choose a formula...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(FormulaInputModal(self.values))
+        await interaction.response.send_modal(FormulaInputModal(self.values[0]))
 
 
 # --- BUTTON FOR DM INSTRUCTIONS ---
@@ -141,16 +159,22 @@ class DeleteVerifyModal(discord.ui.Modal):
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
+    
+    # Pre-load files into RAM immediately when starting up
+    load_data_into_memory()
+    print("Database loaded securely into memory cache.")
+    
     if bot.owner_id is None:
         app = await bot.application_info()
         bot.owner_id = app.owner.id
     
     try:
         await bot.tree.sync()
+        print("Synced slash commands.")
     except Exception as e:
-        print(e)
+        print(f"Sync failed: {e}")
 
-# Command 1: Public Combined Panel
+# Command 1: Public Combined Panel (Instantly pulls from memory cache)
 @bot.hybrid_command(name="panel", description="Opens up the formula selection and instructions panel.")
 async def panel(ctx: commands.Context):
     await ctx.send("What formula do you want to do?", view=PanelView())
@@ -181,12 +205,11 @@ async def setlink(ctx: commands.Context, new_url: str):
 @bot.hybrid_command(name="delete", description="Initiate a secure deletion process.")
 async def delete(ctx: commands.Context):
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    current_link = load_delete_link()
     
     try:
         await ctx.author.send(
             f"⚠️ **Deletion Request Initialized**\n\n"
-            f"🔗 **Action Link:** {current_link}\n"
+            f"🔗 **Action Link:** {cached_delete_link}\n"
             f"🔑 **Your Required Code:** `{code}`\n\n"
             f"Paste this code back into the popup screen on the server to finish validation."
         )
